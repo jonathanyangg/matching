@@ -13,8 +13,12 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = './uploads'
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Use simple ephemeral storage
+app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
+
+# Ensure upload directory exists with proper permissions
+os.makedirs(app.config['UPLOAD_FOLDER'], mode=0o777, exist_ok=True)
 
 @app.route('/')
 def home():
