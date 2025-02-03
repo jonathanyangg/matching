@@ -64,15 +64,20 @@ def match_students():
             logging.error("Both files are required for matching.")
             return jsonify({"error": "Both files are required!"}), 400
 
-        prospective_path = os.path.join(app.config['UPLOAD_FOLDER'], "prospective_students.csv")
-        current_path = os.path.join(app.config['UPLOAD_FOLDER'], "current_students.csv")
+        # Create absolute paths using the full system path
+        upload_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
+        prospective_path = os.path.join(upload_dir, "prospective_students.csv")
+        current_path = os.path.join(upload_dir, "current_students.csv")
+
+        # Ensure upload directory exists
+        os.makedirs(upload_dir, exist_ok=True)
 
         # Save the uploaded files
         prospective_file.save(prospective_path)
         current_file.save(current_path)
-        logging.info("Files successfully uploaded.")
+        logging.info(f"Files saved to: {upload_dir}")
 
-        # Pass file paths to the Celery task
+        # Pass absolute file paths to the Celery task
         task = generate_embeddings_task.delay(prospective_path, current_path)
         delete_files.apply_async(args=[[prospective_path, current_path]], countdown=3600)
         logging.info(f"Task ID: {task.id}")
