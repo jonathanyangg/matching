@@ -4,6 +4,9 @@ import os
 import pandas as pd
 import logging
 from dotenv import load_dotenv
+import io
+import redis
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -19,6 +22,9 @@ app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 
 # Ensure upload directory exists with proper permissions
 os.makedirs(app.config['UPLOAD_FOLDER'], mode=0o777, exist_ok=True)
+
+# Initialize Redis connection
+redis_client = redis.from_url(os.environ.get("REDIS_URL"))
 
 @app.route('/')
 def home():
@@ -68,22 +74,23 @@ def match_students():
             logging.error("Both files are required for matching.")
             return jsonify({"error": "Both files are required!"}), 400
 
-        # Create absolute paths using the full system path
-        upload_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
-        prospective_path = os.path.join(upload_dir, "prospective_students.csv")
-        current_path = os.path.join(upload_dir, "current_students.csv")
+        # Read files and store in Redis
+        prospective_content = prospective_file.read()
+        current_content = current_file.read()
 
-        # Ensure upload directory exists
-        os.makedirs(upload_dir, exist_ok=True)
+        # Generate unique keys for this upload
+        task_id = str(uuid.uuid4())
+        prospective_key = f"prospective_{task_id}"
+        current_key = f"current_{task_id}"
 
-        # Save the uploaded files
-        prospective_file.save(prospective_path)
-        current_file.save(current_path)
-        logging.info(f"Files saved to: {upload_dir}")
+        # Store in Redis with 1-hour expiration
+        redis_client.setex(prospective_key, 3600, prospective_content)
+        redis_client.setex(current_key, 3600, current_content)
 
-        # Pass absolute file paths to the Celery task
-        task = generate_embeddings_task.delay(prospective_path, current_path)
-        delete_files.apply_async(args=[[prospective_path, current_path]], countdown=3600)
+        logging.info(f"Files stored in Redis with task ID: {task_id}")
+
+        # Pass Redis keys to Celery task
+        task = generate_embeddings_task.delay(prospective_key, current_key)
         logging.info(f"Task ID: {task.id}")
 
         return render_template("loading.html", task_id=task.id)

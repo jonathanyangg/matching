@@ -5,6 +5,8 @@ import os
 from celery import Celery
 from dotenv import load_dotenv
 import logging
+import io
+import redis
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +27,9 @@ celery_app = Celery(
 # Configure consistent upload directory
 UPLOAD_FOLDER = '/tmp/uploads'
 os.makedirs(UPLOAD_FOLDER, mode=0o777, exist_ok=True)
+
+# Initialize Redis connection
+redis_client = redis.from_url(os.environ.get("REDIS_URL"))
 
 def cosine_similarity(vec1, vec2):
     vec1 = np.array(vec1)
@@ -83,20 +88,20 @@ def generate_match_explanation(prospective_text, guide_text):
 
 
 @celery_app.task
-def generate_embeddings_task(prospective_path, current_path):
+def generate_embeddings_task(prospective_key, current_key):
     try:
-        # Verify files exist before processing
-        if not os.path.exists(prospective_path):
-            logging.error(f"Prospective file not found at: {prospective_path}")
-            raise FileNotFoundError(f"Prospective file not found")
-        if not os.path.exists(current_path):
-            logging.error(f"Current file not found at: {current_path}")
-            raise FileNotFoundError(f"Current file not found")
-
-        logging.info(f"Processing files: {prospective_path} and {current_path}")
+        logging.info(f"Starting task with Redis keys - Prospective: {prospective_key}, Current: {current_key}")
         
-        prospective_df = pd.read_csv(prospective_path)
-        current_df = pd.read_csv(current_path)
+        # Get file contents from Redis
+        prospective_content = redis_client.get(prospective_key)
+        current_content = redis_client.get(current_key)
+
+        if not prospective_content or not current_content:
+            raise FileNotFoundError("Could not retrieve files from Redis")
+
+        # Convert bytes to DataFrame
+        prospective_df = pd.read_csv(io.BytesIO(prospective_content))
+        current_df = pd.read_csv(io.BytesIO(current_content))
 
         prospective_df['Text Query'] = prospective_df.apply(format_row, axis=1)
         current_df['Text Query'] = current_df.apply(format_row, axis=1)
@@ -145,12 +150,13 @@ def generate_embeddings_task(prospective_path, current_path):
             "suggestion_3", "description_3", "match_score_3"
         ]]
 
-        # Save CSV in the same temp directory
-        output_path = os.path.join(UPLOAD_FOLDER, "custom_matched_students.csv")
-        prospective_df.to_csv(output_path, index=False)
-        logging.info(f"Saved results to: {output_path}")
+        # Save results back to Redis
+        output = io.StringIO()
+        prospective_df.to_csv(output, index=False)
+        result_key = f"result_{prospective_key}"
+        redis_client.setex(result_key, 3600, output.getvalue())
 
-        return {"csv_path": output_path}
+        return {"result_key": result_key}
 
     except Exception as e:
         logging.error(f"Error in generate_embeddings_task: {e}")
