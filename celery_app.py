@@ -22,6 +22,10 @@ celery_app = Celery(
     backend=os.environ.get("BACKEND")  # Redis backend URL
 )
 
+# Configure consistent upload directory
+UPLOAD_FOLDER = '/tmp/uploads'
+os.makedirs(UPLOAD_FOLDER, mode=0o777, exist_ok=True)
+
 def cosine_similarity(vec1, vec2):
     vec1 = np.array(vec1)
     vec2 = np.array(vec2)
@@ -80,61 +84,77 @@ def generate_match_explanation(prospective_text, guide_text):
 
 @celery_app.task
 def generate_embeddings_task(prospective_path, current_path):
-    prospective_df = pd.read_csv(prospective_path)
-    current_df = pd.read_csv(current_path)
+    try:
+        # Verify files exist before processing
+        if not os.path.exists(prospective_path):
+            logging.error(f"Prospective file not found at: {prospective_path}")
+            raise FileNotFoundError(f"Prospective file not found")
+        if not os.path.exists(current_path):
+            logging.error(f"Current file not found at: {current_path}")
+            raise FileNotFoundError(f"Current file not found")
 
-    prospective_df['Text Query'] = prospective_df.apply(format_row, axis=1)
-    current_df['Text Query'] = current_df.apply(format_row, axis=1)
+        logging.info(f"Processing files: {prospective_path} and {current_path}")
+        
+        prospective_df = pd.read_csv(prospective_path)
+        current_df = pd.read_csv(current_path)
 
-    prospective_df['Embeddings'] = prospective_df['Text Query'].apply(api_call)
-    current_df['Embeddings'] = current_df['Text Query'].apply(api_call)
+        prospective_df['Text Query'] = prospective_df.apply(format_row, axis=1)
+        current_df['Text Query'] = current_df.apply(format_row, axis=1)
 
-    # Initialize suggestions, descriptions, and match scores
-    for i in range(1, 4):
-        prospective_df[f'suggestion_{i}'] = np.nan
-        prospective_df[f'description_{i}'] = np.nan
-        prospective_df[f'match_score_{i}'] = np.nan
+        prospective_df['Embeddings'] = prospective_df['Text Query'].apply(api_call)
+        current_df['Embeddings'] = current_df['Text Query'].apply(api_call)
 
-    for i, row in prospective_df.iterrows():
-        # Filter current students by gender and YOG
-        filtered_current_df = current_df[
-            (current_df["Person Sex"] == row["Person Sex"]) &
-            (current_df["YOG"] == row["YOG"])
-        ]
+        # Initialize suggestions, descriptions, and match scores
+        for i in range(1, 4):
+            prospective_df[f'suggestion_{i}'] = np.nan
+            prospective_df[f'description_{i}'] = np.nan
+            prospective_df[f'match_score_{i}'] = np.nan
 
-        if filtered_current_df.empty:
-            continue
+        for i, row in prospective_df.iterrows():
+            # Filter current students by gender and YOG
+            filtered_current_df = current_df[
+                (current_df["Person Sex"] == row["Person Sex"]) &
+                (current_df["YOG"] == row["YOG"])
+            ]
 
-        # Calculate cosine similarity with each student in the filtered current_df
-        similarities = filtered_current_df["Embeddings"].apply(
-            lambda x: cosine_similarity(row["Embeddings"], x)
-        )
+            if filtered_current_df.empty:
+                continue
 
-        # Add the similarities as a new column
-        filtered_current_df = filtered_current_df.assign(similarity=similarities)
+            # Calculate cosine similarity with each student in the filtered current_df
+            similarities = filtered_current_df["Embeddings"].apply(
+                lambda x: cosine_similarity(row["Embeddings"], x)
+            )
 
-        # Sort by similarity in descending order
-        top_matches = filtered_current_df.sort_values(by="similarity", ascending=False).head(3)
+            # Add the similarities as a new column
+            filtered_current_df = filtered_current_df.assign(similarity=similarities)
 
-        for j, (_, match_row) in enumerate(top_matches.iterrows(), start=1):
-            prospective_df.at[i, f"suggestion_{j}"] = match_row["Slate ID"]
-            explanation = generate_match_explanation(row["Text Query"], match_row["Text Query"])
-            prospective_df.at[i, f"description_{j}"] = explanation
-            prospective_df.at[i, f"match_score_{j}"] = match_row["similarity"]
+            # Sort by similarity in descending order
+            top_matches = filtered_current_df.sort_values(by="similarity", ascending=False).head(3)
 
-    # Include additional metadata and finalize columns
-    prospective_df = prospective_df[[
-        "Slate ID", "YOG", "Text Query",
-        "suggestion_1", "description_1", "match_score_1",
-        "suggestion_2", "description_2", "match_score_2",
-        "suggestion_3", "description_3", "match_score_3"
-    ]]
+            for j, (_, match_row) in enumerate(top_matches.iterrows(), start=1):
+                prospective_df.at[i, f"suggestion_{j}"] = match_row["Slate ID"]
+                explanation = generate_match_explanation(row["Text Query"], match_row["Text Query"])
+                prospective_df.at[i, f"description_{j}"] = explanation
+                prospective_df.at[i, f"match_score_{j}"] = match_row["similarity"]
 
-    # Save CSV without styling
-    output_path = os.path.join(os.path.dirname(prospective_path), "custom_matched_students.csv")
-    prospective_df.to_csv(output_path, index=False)
+        # Include additional metadata and finalize columns
+        prospective_df = prospective_df[[
+            "Slate ID", "YOG", "Text Query",
+            "suggestion_1", "description_1", "match_score_1",
+            "suggestion_2", "description_2", "match_score_2",
+            "suggestion_3", "description_3", "match_score_3"
+        ]]
 
-    return {"csv_path": output_path}
+        # Save CSV in the same temp directory
+        output_path = os.path.join(UPLOAD_FOLDER, "custom_matched_students.csv")
+        prospective_df.to_csv(output_path, index=False)
+        logging.info(f"Saved results to: {output_path}")
+
+        return {"csv_path": output_path}
+
+    except Exception as e:
+        logging.error(f"Error in generate_embeddings_task: {e}")
+        raise
 
 
 @celery_app.task
