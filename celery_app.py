@@ -18,8 +18,8 @@ openai.api_key = os.environ.get("OPENAI_API_KEY")
 # Configure Celery to use Redis as the message broker
 celery_app = Celery(
     'tasks',
-    broker='redis://localhost:6379/0',  # Redis broker URL
-    backend='redis://localhost:6379/0'  # Redis backend URL
+    broker=os.environ.get("BROKER"),  # Redis broker URL
+    backend=os.environ.get("BACKEND")  # Redis backend URL
 )
 
 def cosine_similarity(vec1, vec2):
