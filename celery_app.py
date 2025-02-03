@@ -131,7 +131,7 @@ def generate_embeddings_task(prospective_key, current_key):
             # Filter current students by matching gender and YOG (Year of Graduation)
             filtered_current_df = current_df[
                 (current_df["Person Sex"] == row["Person Sex"]) &
-                (int(current_df["YOG"]) - int(row["YOG"])) == 1
+                (current_df["YOG"].astype(float) - row["YOG"].astype(float) == 1)
             ]
 
             if filtered_current_df.empty:
