@@ -4,9 +4,6 @@ import os
 import pandas as pd
 import logging
 from dotenv import load_dotenv
-import io
-import redis
-import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -22,9 +19,6 @@ app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
 
 # Ensure upload directory exists with proper permissions
 os.makedirs(app.config['UPLOAD_FOLDER'], mode=0o777, exist_ok=True)
-
-# Initialize Redis connection
-redis_client = redis.from_url(os.environ.get("REDIS_URL"))
 
 @app.route('/')
 def home():
@@ -74,23 +68,22 @@ def match_students():
             logging.error("Both files are required for matching.")
             return jsonify({"error": "Both files are required!"}), 400
 
-        # Read files and store in Redis
-        prospective_content = prospective_file.read()
-        current_content = current_file.read()
+        # Create absolute paths using the full system path
+        upload_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
+        prospective_path = os.path.join(upload_dir, "prospective_students.csv")
+        current_path = os.path.join(upload_dir, "current_students.csv")
 
-        # Generate unique keys for this upload
-        task_id = str(uuid.uuid4())
-        prospective_key = f"prospective_{task_id}"
-        current_key = f"current_{task_id}"
+        # Ensure upload directory exists
+        os.makedirs(upload_dir, exist_ok=True)
 
-        # Store in Redis with 1-hour expiration
-        redis_client.setex(prospective_key, 3600, prospective_content)
-        redis_client.setex(current_key, 3600, current_content)
+        # Save the uploaded files
+        prospective_file.save(prospective_path)
+        current_file.save(current_path)
+        logging.info(f"Files saved to: {upload_dir}")
 
-        logging.info(f"Files stored in Redis with task ID: {task_id}")
-
-        # Pass Redis keys to Celery task
-        task = generate_embeddings_task.delay(prospective_key, current_key)
+        # Pass absolute file paths to the Celery task
+        task = generate_embeddings_task.delay(prospective_path, current_path)
+        delete_files.apply_async(args=[[prospective_path, current_path]], countdown=3600)
         logging.info(f"Task ID: {task.id}")
 
         return render_template("loading.html", task_id=task.id)
@@ -106,40 +99,16 @@ def task_status(task_id):
         logging.info(f"Checking status for Task ID: {task_id}. Current state: {task.state}")
 
         if task.state == 'SUCCESS':
-            result = task.result
-            if not result or 'result_key' not in result:
-                logging.error("No result key returned from the task result.")
-                return jsonify({"status": "FAILURE", "error": "No result key in task result"}), 500
+            csv_path = task.result.get('csv_path')
+            if not csv_path:
+                logging.error("No CSV path returned from the task result.")
+                return jsonify({"status": "FAILURE", "error": "No CSV path in task result"}), 500
 
-            # Get the data from Redis
-            result_key = result['result_key']
-            csv_data = redis_client.get(result_key)
-            if not csv_data:
-                logging.error("Could not retrieve CSV data from Redis.")
-                return jsonify({"status": "FAILURE", "error": "Could not retrieve results"}), 500
-
-            # Save the CSV data to a file
-            filename = f"matches_{task_id}.csv"
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            with open(file_path, 'w') as f:
-                f.write(csv_data.decode('utf-8'))
-
-            # Schedule cleanup
-            delete_files.apply_async(args=[[file_path]], countdown=3600)
-            
+            delete_files.apply_async(args=[[csv_path]], countdown=3600)
+            filename = os.path.basename(csv_path)
             return jsonify({"status": "SUCCESS", "redirect_url": url_for('results', filename=filename)})
 
-        if task.state == 'FAILURE':
-            # Clean up Redis keys
-            prospective_key = f"prospective_{task_id}"
-            current_key = f"current_{task_id}"
-            result_key = f"result_prospective_{task_id}"
-            
-            for key in [prospective_key, current_key, result_key]:
-                if redis_client.exists(key):
-                    redis_client.delete(key)
-                    logging.info(f"Cleaned up Redis key: {key}")
-            
+        elif task.state == 'FAILURE':
             error_info = str(task.info)
             logging.error(f"Task failed with error: {error_info}")
             return jsonify({"status": "FAILURE", "error": error_info}), 500
