@@ -11,7 +11,9 @@ Loading
     <div id="log-container" class="bg-light p-3 mt-3" style="width: 80%; max-width: 600px; height: 200px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px;">
         <p id="log-placeholder" class="text-muted">Logs will appear here...</p>
     </div>
-    <div id="download-container"></div> <!-- Added for error messages -->
+    <div id="download-container"></div>
+    <!-- Add cancel button -->
+    <button id="cancelButton" class="btn btn-danger mt-3">Cancel Processing</button>
 </div>
 {% endblock %}
 
@@ -68,5 +70,27 @@ Loading
 
     // Start checking task status
     checkTaskStatus("{{ task_id }}");
+
+    // Add cancel button functionality
+    document.getElementById('cancelButton').addEventListener('click', function() {
+        if (confirm('Are you sure you want to cancel? This will stop all processing.')) {
+            fetch(`/cancel_task/{{ task_id }}`, {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'cancelled') {
+                    appendLog('Task cancelled successfully');
+                    window.location.href = '/';  // Redirect to home page
+                } else {
+                    appendLog('Error cancelling task: ' + data.error);
+                }
+            })
+            .catch(error => {
+                appendLog('Error cancelling task: ' + error);
+                alert('Error cancelling task. Please try again.');
+            });
+        }
+    });
 </script>
 {% endblock %}

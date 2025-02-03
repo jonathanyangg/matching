@@ -154,5 +154,27 @@ def download_file(filename):
         logging.error(f"Error during file download: {e}")
         return jsonify({"error": "Failed to download file"}), 500
 
+
+@app.route('/cancel_task/<task_id>', methods=['POST'])
+def cancel_task(task_id):
+    try:
+        # Revoke/terminate the main task
+        task = generate_embeddings_task.AsyncResult(task_id)
+        task.revoke(terminate=True)
+        
+        # Clean up uploaded files
+        prospective_path = os.path.join(app.config['UPLOAD_FOLDER'], "prospective_students.csv")
+        current_path = os.path.join(app.config['UPLOAD_FOLDER'], "current_students.csv")
+        
+        for path in [prospective_path, current_path]:
+            if os.path.exists(path):
+                os.remove(path)
+                logging.info(f"Deleted file: {path}")
+        
+        return jsonify({"status": "cancelled"})
+    except Exception as e:
+        logging.error(f"Error cancelling task: {e}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == "__main__":
     app.run(debug=True)
