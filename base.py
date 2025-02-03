@@ -106,16 +106,40 @@ def task_status(task_id):
         logging.info(f"Checking status for Task ID: {task_id}. Current state: {task.state}")
 
         if task.state == 'SUCCESS':
-            csv_path = task.result.get('csv_path')
-            if not csv_path:
-                logging.error("No CSV path returned from the task result.")
-                return jsonify({"status": "FAILURE", "error": "No CSV path in task result"}), 500
+            result = task.result
+            if not result or 'result_key' not in result:
+                logging.error("No result key returned from the task result.")
+                return jsonify({"status": "FAILURE", "error": "No result key in task result"}), 500
 
-            delete_files.apply_async(args=[[csv_path]], countdown=3600)
-            filename = os.path.basename(csv_path)
+            # Get the data from Redis
+            result_key = result['result_key']
+            csv_data = redis_client.get(result_key)
+            if not csv_data:
+                logging.error("Could not retrieve CSV data from Redis.")
+                return jsonify({"status": "FAILURE", "error": "Could not retrieve results"}), 500
+
+            # Save the CSV data to a file
+            filename = f"matches_{task_id}.csv"
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            with open(file_path, 'w') as f:
+                f.write(csv_data.decode('utf-8'))
+
+            # Schedule cleanup
+            delete_files.apply_async(args=[[file_path]], countdown=3600)
+            
             return jsonify({"status": "SUCCESS", "redirect_url": url_for('results', filename=filename)})
 
-        elif task.state == 'FAILURE':
+        if task.state == 'FAILURE':
+            # Clean up Redis keys
+            prospective_key = f"prospective_{task_id}"
+            current_key = f"current_{task_id}"
+            result_key = f"result_prospective_{task_id}"
+            
+            for key in [prospective_key, current_key, result_key]:
+                if redis_client.exists(key):
+                    redis_client.delete(key)
+                    logging.info(f"Cleaned up Redis key: {key}")
+            
             error_info = str(task.info)
             logging.error(f"Task failed with error: {error_info}")
             return jsonify({"status": "FAILURE", "error": error_info}), 500
