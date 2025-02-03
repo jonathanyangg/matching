@@ -4,6 +4,9 @@ import os
 import pandas as pd
 import logging
 from dotenv import load_dotenv
+import io
+import redis
+import uuid
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -16,47 +19,14 @@ app = Flask(__name__)
 
 # Use simple ephemeral storage
 app.config['UPLOAD_FOLDER'] = '/tmp/uploads'
-
-# Ensure upload directory exists with proper permissions
 os.makedirs(app.config['UPLOAD_FOLDER'], mode=0o777, exist_ok=True)
+
+# Initialize Redis connection
+redis_client = redis.from_url(os.environ.get("REDIS_URL"))
 
 @app.route('/')
 def home():
     return render_template("index.html")
-
-@app.route('/process-matches', methods=['POST'])
-def process_matches():
-    try:
-        file = request.files.get('file')  # Upload CSV file
-
-        if not file:
-            logging.error("No file uploaded.")
-            return jsonify({"error": "No file uploaded"}), 400
-
-        matches_df = pd.read_csv(file)
-
-        # Validate required columns in the uploaded file
-        required_columns = ["Guide Profile", "Student Profile"]
-        missing_columns = [col for col in required_columns if col not in matches_df.columns]
-
-        if missing_columns:
-            logging.warning(f"Missing required columns: {missing_columns}")
-            for col in missing_columns:
-                matches_df[col] = 'N/A'  # Add default placeholder values
-
-        # Placeholder for explanation generation (removed dependency on gpt_utils)
-        matches_df["Explanation"] = "Generated explanation placeholder"  # Add mock explanation column
-
-        # Save the updated CSV
-        output_path = os.path.join(app.config['UPLOAD_FOLDER'], "updated_matches.csv")
-        matches_df.to_csv(output_path, index=False)
-        logging.info(f"Updated matches saved to {output_path}")
-
-        return send_file(output_path, as_attachment=True)
-
-    except Exception as e:
-        logging.error(f"Error in process_matches: {e}")
-        return jsonify({"error": "Failed to process matches"}), 500
 
 @app.route('/match_students', methods=['POST'])
 def match_students():
@@ -68,24 +38,29 @@ def match_students():
             logging.error("Both files are required for matching.")
             return jsonify({"error": "Both files are required!"}), 400
 
-        # Create absolute paths using the full system path
-        upload_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
-        prospective_path = os.path.join(upload_dir, "prospective_students.csv")
-        current_path = os.path.join(upload_dir, "current_students.csv")
+        # Read files and store in Redis
+        prospective_content = prospective_file.read()
+        current_content = current_file.read()
 
-        # Ensure upload directory exists
-        os.makedirs(upload_dir, exist_ok=True)
+        # Generate a custom unique ID that we will also use as the Celery task ID
+        upload_id = str(uuid.uuid4())
+        prospective_key = f"prospective_{upload_id}"
+        current_key = f"current_{upload_id}"
 
-        # Save the uploaded files
-        prospective_file.save(prospective_path)
-        current_file.save(current_path)
-        logging.info(f"Files saved to: {upload_dir}")
+        # Store file contents in Redis with 1-hour expiration
+        redis_client.setex(prospective_key, 3600, prospective_content)
+        redis_client.setex(current_key, 3600, current_content)
 
-        # Pass absolute file paths to the Celery task
-        task = generate_embeddings_task.delay(prospective_path, current_path)
-        delete_files.apply_async(args=[[prospective_path, current_path]], countdown=3600)
-        logging.info(f"Task ID: {task.id}")
+        logging.info(f"Files stored in Redis with upload ID: {upload_id}")
 
+        # Use apply_async and pass upload_id as the Celery task id
+        task = generate_embeddings_task.apply_async(
+            args=[prospective_key, current_key],
+            task_id=upload_id
+        )
+        logging.info(f"Celery Task ID: {task.id}")
+
+        # Return the task id (which is also the upload_id) to the client
         return render_template("loading.html", task_id=task.id)
 
     except Exception as e:
@@ -99,16 +74,40 @@ def task_status(task_id):
         logging.info(f"Checking status for Task ID: {task_id}. Current state: {task.state}")
 
         if task.state == 'SUCCESS':
-            csv_path = task.result.get('csv_path')
-            if not csv_path:
-                logging.error("No CSV path returned from the task result.")
-                return jsonify({"status": "FAILURE", "error": "No CSV path in task result"}), 500
+            result = task.result
+            if not result or 'result_key' not in result:
+                logging.error("No result key returned from the task result.")
+                return jsonify({"status": "FAILURE", "error": "No result key in task result"}), 500
 
-            delete_files.apply_async(args=[[csv_path]], countdown=3600)
-            filename = os.path.basename(csv_path)
+            # Get the data from Redis
+            result_key = result['result_key']
+            csv_data = redis_client.get(result_key)
+            if not csv_data:
+                logging.error("Could not retrieve CSV data from Redis.")
+                return jsonify({"status": "FAILURE", "error": "Could not retrieve results"}), 500
+
+            # Save the CSV data to a file
+            filename = f"matches_{task_id}.csv"
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            with open(file_path, 'w') as f:
+                f.write(csv_data.decode('utf-8'))
+
+            # Schedule cleanup after one hour
+            delete_files.apply_async(args=[[file_path]], countdown=3600)
+            
             return jsonify({"status": "SUCCESS", "redirect_url": url_for('results', filename=filename)})
 
-        elif task.state == 'FAILURE':
+        if task.state == 'FAILURE':
+            # Build Redis keys using the same task_id (which is our upload_id)
+            prospective_key = f"prospective_{task_id}"
+            current_key = f"current_{task_id}"
+            result_key = f"result_prospective_{task_id}"
+            
+            for key in [prospective_key, current_key, result_key]:
+                if redis_client.exists(key):
+                    redis_client.delete(key)
+                    logging.info(f"Cleaned up Redis key: {key}")
+            
             error_info = str(task.info)
             logging.error(f"Task failed with error: {error_info}")
             return jsonify({"status": "FAILURE", "error": error_info}), 500
@@ -133,8 +132,7 @@ def results():
 
     # Read the results file to extract descriptions
     results_df = pd.read_csv(file_path)
-    results_data = results_df.to_dict(orient="records")  # Convert to list of dictionaries
-
+    results_data = results_df.to_dict(orient="records")
     return render_template("results.html", results_data=results_data, filename=filename)
 
 @app.route('/download/<filename>')
@@ -144,7 +142,6 @@ def download_file(filename):
         prospective_file_path = os.path.join(app.config['UPLOAD_FOLDER'], "prospective_students.csv")
         current_file_path = os.path.join(app.config['UPLOAD_FOLDER'], "current_students.csv")
 
-        # Serve the file
         if not os.path.exists(file_path):
             logging.error(f"File not found for download: {file_path}")
             return jsonify({"error": "File not found"}), 404
@@ -163,22 +160,21 @@ def download_file(filename):
         logging.error(f"Error during file download: {e}")
         return jsonify({"error": "Failed to download file"}), 500
 
-
 @app.route('/cancel_task/<task_id>', methods=['POST'])
 def cancel_task(task_id):
     try:
-        # Revoke/terminate the main task
+        # Revoke the Celery task using the task_id (which is also our upload_id)
         task = generate_embeddings_task.AsyncResult(task_id)
         task.revoke(terminate=True)
         
-        # Clean up uploaded files
-        prospective_path = os.path.join(app.config['UPLOAD_FOLDER'], "prospective_students.csv")
-        current_path = os.path.join(app.config['UPLOAD_FOLDER'], "current_students.csv")
+        # Build Redis keys from the same task_id
+        prospective_key = f"prospective_{task_id}"
+        current_key = f"current_{task_id}"
         
-        for path in [prospective_path, current_path]:
-            if os.path.exists(path):
-                os.remove(path)
-                logging.info(f"Deleted file: {path}")
+        for path in [prospective_key, current_key]:
+            if redis_client.exists(path):
+                redis_client.delete(path)
+                logging.info(f"Deleted Redis key: {path}")
         
         return jsonify({"status": "cancelled"})
     except Exception as e:
