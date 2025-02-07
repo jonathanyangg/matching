@@ -1,29 +1,32 @@
 {% extends "base.html" %}
 
-{% block title %}
-Tour Guide Matching Results
-{% endblock %}
+{% block title %}Tour Guide Matching Results{% endblock %}
 
 {% block content %}
-<div class="container mt-4">
-    <h1>Tour Guide Matching Results</h1>
-    <p class="mt-4">Your matches have been generated successfully. You can download the CSV file below:</p>
+<div class="flex flex-col items-center justify-center mt-8">
+    <h1 class="text-4xl font-bold text-[#ededed] mb-6">Tour Guide Matching Results</h1>
+    <p class="text-[#d6d4d4] mb-8">Your matches have been generated successfully. You can download the CSV file below:</p>
 
-    <!-- Download and Generate More Matches -->
-    <div class="mt-4">
-        <a href="{{ url_for('download_file', filename=filename) }}" class="btn btn-primary">Download Matched Students CSV</a>
-        <a href="/" class="btn btn-secondary">Generate More Matches</a>
+    <div class="flex gap-4">
+        <a href="{{ url_for('download_file', filename=filename) }}" 
+           class="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors duration-300">
+            Download Matched Students CSV
+        </a>
+        <a href="/" 
+           class="px-6 py-3 bg-[#2a2a2a] text-white rounded-lg hover:bg-[#3a3a3a] transition-colors duration-300">
+            Generate More Matches
+        </a>
     </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
 <script>
-    // Confetti on page load
     window.onload = function () {
         confetti({
             particleCount: 200,
             spread: 100,
-            origin: { y: 0.6 } // Adjust where the confetti starts
+            origin: { y: 0.6 },
+            colors: ['#dc2626', '#ffffff', '#404040'] // Red, white, and dark gray to match theme
         });
     };
 </script>

@@ -1,19 +1,22 @@
 {% extends "base.html" %}
 
-{% block title %}
-Loading
-{% endblock %}
+{% block title %}Loading{% endblock %}
 
 {% block content %}
-<div class="d-flex flex-column justify-content-center align-items-center mt-4">
-    <h2>Loading...</h2>
-    <p>Please wait while matches are being generated with AI.</p>
-    <div id="log-container" class="bg-light p-3 mt-3" style="width: 80%; max-width: 600px; height: 200px; overflow-y: auto; border: 1px solid #ccc; border-radius: 5px;">
-        <p id="log-placeholder" class="text-muted">Logs will appear here...</p>
+<div class="flex flex-col items-center justify-center mt-8">
+    <h2 class="text-3xl font-bold text-[#ededed] mb-4">Loading...</h2>
+    <p class="text-[#d6d4d4] mb-6">Please wait while matches are being generated with AI.</p>
+    
+    <div id="log-container" class="w-full max-w-2xl bg-[#1a1a1a] p-4 rounded-xl border border-[#2a2a2a] h-48 overflow-y-auto mb-6">
+        <p id="log-placeholder" class="text-[#6e6e6e]">Logs will appear here...</p>
     </div>
+    
     <div id="download-container"></div>
-    <!-- Add cancel button -->
-    <button id="cancelButton" class="btn btn-danger mt-3">Cancel Processing</button>
+    
+    <button id="cancelButton" 
+            class="px-6 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors duration-300">
+        Cancel Processing
+    </button>
 </div>
 {% endblock %}
 
@@ -31,7 +34,7 @@ Loading
         // Create a new log entry
         const logEntry = document.createElement("p");
         logEntry.textContent = message;
-        logEntry.classList.add("mb-1"); // Add a small margin
+        logEntry.classList.add("mb-1", "text-[#ededed]"); // Added text color class
 
         // Append the log entry
         logContainer.appendChild(logEntry);
