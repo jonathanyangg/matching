@@ -34,7 +34,7 @@ def cosine_similarity(vec1, vec2):
     return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
 
 # Columns to merge for generating the text query
-columns_to_merge = [
+columns_to_merge_prospective = [
     'Res Status',
     'Person Sex',
     'Person Academic Interests',
@@ -50,12 +50,32 @@ columns_to_merge = [
     'Person Hispanic'
 ]
 
-def format_row(row):
+columns_to_merge_current = [
+    'Residential Status (Boarding or Day)',
+    'Sex',
+    'Academic Interests:',
+    'Extra-curricular Interests (Clubs, affinity groups, hobbies, etc) ',
+    'Fall co-curricular:',
+    'Winter co-curricular:',
+    'Spring co-curricular:',
+    'Hometown',
+    'State/Region',
+    'Country',
+    'School prior to attending Lawrenceville: ',
+    'Race',
+]
+
+
+def format_row_prospective(row):
     """Format a DataFrame row by concatenating selected columns."""
-    return ', '.join([f"{col}: {row[col]}" for col in columns_to_merge if pd.notna(row[col])])
+    return ', '.join([f"{col}: {row[col]}" for col in columns_to_merge_prospective if pd.notna(row[col])])
+
+def format_row_current(row):
+    """Format a DataFrame row by concatenating selected columns."""
+    return ', '.join([f"{col}: {row[col]}" for col in columns_to_merge_current if pd.notna(row[col])])
 
 def api_call(text):
-    """Call OpenAI’s embedding API for the provided text."""
+    """Call OpenAI's embedding API for the provided text."""
     response = openai.Embedding.create(
         model="text-embedding-ada-002",
         input=text
@@ -113,8 +133,8 @@ def generate_embeddings_task(prospective_key, current_key):
         current_df = pd.read_csv(io.BytesIO(current_content))
 
         # Create a text query column for each DataFrame
-        prospective_df['Text Query'] = prospective_df.apply(format_row, axis=1)
-        current_df['Text Query'] = current_df.apply(format_row, axis=1)
+        prospective_df['Text Query'] = prospective_df.apply(format_row_prospective, axis=1)
+        current_df['Text Query'] = current_df.apply(format_row_current, axis=1)
 
         # Generate embeddings for each text query
         prospective_df['Embeddings'] = prospective_df['Text Query'].apply(api_call)
@@ -122,40 +142,55 @@ def generate_embeddings_task(prospective_key, current_key):
 
         # Prepare columns for match suggestions, explanations, and scores
         for i in range(1, 4):
-            prospective_df[f'suggestion_{i}'] = np.nan
-            prospective_df[f'description_{i}'] = np.nan
-            prospective_df[f'match_score_{i}'] = np.nan
+            prospective_df[f'suggestion_{i}'] = ""
+            prospective_df[f'description_{i}'] = ""
+            prospective_df[f'match_score_{i}'] = 0.0
 
         # For each prospective student, find the top 3 current student matches
         for i, row in prospective_df.iterrows():
-            # Filter current students by matching gender and YOG (Year of Graduation)
-            filtered_current_df = current_df[
-                (current_df["Person Sex"] == row["Person Sex"]) &
-                (current_df["YOG"].astype(float) - float(row["YOG"]) == -1)
-            ]
+            try:
+                # Log the values before filtering
+                logging.info(f"Prospective student gender: {row['Person Sex']}")
+                logging.info(f"Current student genders sample: {current_df['Sex'].head().tolist()}")
+                
+                # Filter current students by matching gender and YOG (Year of Graduation)
+                filtered_current_df = current_df[
+                    (current_df["Sex"].str.upper().str[0] == row["Person Sex"][0].upper()) &
+                    (current_df["Year of Graduation:"].astype(float) - float(row["YOG"]) == -1)
+                ]
+                
+                # Log the filtering results
+                logging.info(f"Found {len(filtered_current_df)} matches for gender and YOG")
+                
+                if filtered_current_df.empty:
+                    logging.warning(f"No matches found for Slate ID: {row['Slate ID']}")
+                    continue
 
-            if filtered_current_df.empty:
+                # Log similarity calculation
+                similarities = filtered_current_df["Embeddings"].apply(
+                    lambda x: cosine_similarity(row["Embeddings"], x)
+                )
+                logging.info(f"Calculated similarities. Max similarity: {similarities.max():.4f}")
+
+                # Add more detailed logging for top matches
+                filtered_current_df = filtered_current_df.assign(similarity=similarities)
+                top_matches = filtered_current_df.sort_values(by="similarity", ascending=False).head(3)
+                logging.info(f"Top 3 match scores: {top_matches['similarity'].tolist()}")
+
+            except Exception as e:
+                logging.error(f"Error processing student {row['Slate ID']}: {str(e)}")
                 continue
-
-            # Compute cosine similarity between embeddings
-            similarities = filtered_current_df["Embeddings"].apply(
-                lambda x: cosine_similarity(row["Embeddings"], x)
-            )
-
-            # Add the similarities as a new column and sort by similarity (highest first)
-            filtered_current_df = filtered_current_df.assign(similarity=similarities)
-            top_matches = filtered_current_df.sort_values(by="similarity", ascending=False).head(3)
 
             # Record the top matches and generate explanations
             for j, (_, match_row) in enumerate(top_matches.iterrows(), start=1):
-                prospective_df.at[i, f"suggestion_{j}"] = match_row["Slate ID"]
+                prospective_df.at[i, f"suggestion_{j}"] = match_row["Name (First Last):"]
                 explanation = generate_match_explanation(row["Text Query"], match_row["Text Query"])
                 prospective_df.at[i, f"description_{j}"] = explanation
                 prospective_df.at[i, f"match_score_{j}"] = match_row["similarity"]
 
         # Finalize the result DataFrame with selected columns
         prospective_df = prospective_df[[
-            "Slate ID", "YOG", "Text Query",
+            "Slate ID", "YOG",
             "suggestion_1", "description_1", "match_score_1",
             "suggestion_2", "description_2", "match_score_2",
             "suggestion_3", "description_3", "match_score_3"
