@@ -59,7 +59,7 @@
                 } else if (data.status === "FAILURE") {
                     appendLog("Task failed with error: " + data.error);
                     const container = document.getElementById("download-container");
-                    container.innerHTML = `<p class="text-danger">Task failed: ${data.error}</p>`;
+                    container.innerHTML = `<p class="text-[#ededed]">Task failed: ${data.error}</p>`;
                 } else {
                     appendLog("Task still running. Retrying in 2 seconds...");
                     setTimeout(() => checkTaskStatus(taskId), 2000);
