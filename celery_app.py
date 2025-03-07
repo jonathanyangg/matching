@@ -7,6 +7,7 @@ import io
 from celery import Celery
 from dotenv import load_dotenv
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 
 load_dotenv()
@@ -109,88 +110,78 @@ def generate_embeddings_task(prospective_key, current_key):
 
         prospective_df.iloc[:, 2] = prospective_df.iloc[:, 2].replace('PG', '12')
 
-        # Generate embeddings for each text query
+        # 1. First generate embeddings for ALL students
+        logging.info("Generating embeddings for prospective students...")
         prospective_df['Embeddings'] = prospective_df['Text Query'].apply(api_call)
+        
+        logging.info("Generating embeddings for current students...")
         current_df['Embeddings'] = current_df['Text Query'].apply(api_call)
 
-        # Prepare columns for match suggestions, explanations, and scores
-        for i in range(1, 3):
+        # 2. Initialize result columns
+        for i in range(1, 4):
             prospective_df[f'suggestion_{i}'] = ""
             prospective_df[f'description_{i}'] = ""
             prospective_df[f'match_score_{i}'] = 0.0
 
-        # For each prospective student, find the top 3 current student matches
+        # 3. Process each prospective student
         for i, row in prospective_df.iterrows():
             try:
-                # Log the shapes and types
-                logging.info(f"Prospective DF shape: {prospective_df.shape}")
-                logging.info(f"Current DF shape: {current_df.shape}")
-                logging.info(f"Row type: {type(row)}")
-
-                # Log column names
-                logging.info(f"Prospective DF columns: {prospective_df.columns.tolist()}")
-                logging.info(f"Current DF columns: {current_df.columns.tolist()}")
-
-                # Log the first few rows of each DataFrame
-                logging.info(f"Prospective DF sample:\n{prospective_df.head(2)}")
-                logging.info(f"Current DF sample:\n{current_df.head(2)}")
+                logging.info(f"Processing student {i+1}/{len(prospective_df)}")
                 
-                # Log the values before filtering
-                logging.info(f"Prospective student gender: {row.iloc[1]}")
-                logging.info(f"Current student genders sample: {current_df.iloc[:, 1].head().tolist()}")
-                
-                # Filter current students by matching gender and YOG (Year of Graduation)
-                filtered_current_df = current_df[
-                    (current_df.iloc[:, 1].str.upper().str[0] == row.iloc[1][0].upper()) &
-                    (current_df.iloc[:, 2].astype(float) == float(row.iloc[2]))
-                ]
-                
-                # Log the filtering results
-                logging.info(f"Found {len(filtered_current_df)} matches for gender and YOG")
-                
-                if filtered_current_df.empty:
-                    logging.warning(f"No matches found for Slate ID: {row.iloc[0]}")
-                    continue
-
-                # Log similarity calculation
-                similarities = filtered_current_df["Embeddings"].apply(
-                    lambda x: cosine_similarity(row["Embeddings"], x)
+                # First calculate ALL similarities
+                similarities = current_df['Embeddings'].apply(
+                    lambda x: cosine_similarity(row['Embeddings'], x)
                 )
-                logging.info(f"Calculated similarities. Max similarity: {similarities.max():.4f}")
-
-                # Add more detailed logging for top matches
-                filtered_current_df = filtered_current_df.assign(similarity=similarities)
-                top_matches = filtered_current_df.sort_values(by="similarity", ascending=False).head(2)
-                logging.info(f"Top 2 match scores: {top_matches['similarity'].tolist()}")
-
+                
+                # Then apply gender and grade filters
+                mask = (
+                    (current_df.iloc[:, 1].astype(str).str.upper().str[0] == row.iloc[1][0].upper()) &
+                    (current_df.iloc[:, 2].astype(float) == float(row.iloc[2]))
+                )
+                
+                # Get top matches from filtered results
+                filtered_similarities = similarities[mask]
+                if not filtered_similarities.empty:
+                    top_matches = filtered_similarities.nlargest(3)
+                    
+                    # Store the matches
+                    for j, (idx, score) in enumerate(top_matches.items(), 1):
+                        prospective_df.at[i, f'suggestion_{j}'] = current_df.iloc[idx]['Name (First Last):']
+                        prospective_df.at[i, f'match_score_{j}'] = score
+                        # Generate explanation
+                        explanation = generate_match_explanation(
+                            row['Text Query'],
+                            current_df.iloc[idx]['Text Query']
+                        )
+                        prospective_df.at[i, f'description_{j}'] = explanation
+                
             except Exception as e:
                 logging.error(f"Error processing student {row.iloc[0]}: {str(e)}")
                 continue
 
-            # Record the top matches and generate explanations
-            for j, (_, match_row) in enumerate(top_matches.iterrows(), start=1):
-                prospective_df.at[i, f"suggestion_{j}"] = match_row.iloc[0]
-                explanation = generate_match_explanation(row["Text Query"], match_row["Text Query"])
-                prospective_df.at[i, f"description_{j}"] = explanation
-                prospective_df.at[i, f"match_score_{j}"] = match_row["similarity"]
+        # 4. Select final columns for output
+        result_df = prospective_df[[
+            'Person Reference ID',  # First column
+            'Grade',               # Third column
+            'suggestion_1', 'description_1', 'match_score_1',
+            'suggestion_2', 'description_2', 'match_score_2',
+            'suggestion_3', 'description_3', 'match_score_3'
+        ]]
 
-        # Finalize the result DataFrame with selected columns
-        first_col = prospective_df.columns[0]  # First column (Slate ID)
-        third_col = prospective_df.columns[2]  # Third column (likely Grade/YOG)
-        last_nine_cols = prospective_df.columns[-6:] 
-        selected_columns = [first_col, third_col] + list(last_nine_cols)
+        # After processing all students
+        logging.info(f"Final result shape: {result_df.shape}")
+        logging.info(f"Number of non-empty matches: {(result_df['suggestion_1'] != '').sum()}")
+        logging.info(f"Sample of results:\n{result_df.head(2)}")
 
-        final_df = prospective_df[selected_columns]
-
-        # Instead of saving to disk, store the CSV result back in Redis.
+        # Save to Redis and return
         output = io.StringIO()
-        final_df.to_csv(output, index=False)
-        result_key = f"result_{prospective_key}"  # e.g., "result_prospective_<unique_id>"
+        result_df.to_csv(output, index=False)
+        result_key = f"result_{prospective_key}"
         redis_client.setex(result_key, 3600, output.getvalue())
-
+        
         logging.info(f"Task completed successfully. Result stored in Redis under key: {result_key}")
         return {"result_key": result_key}
-    
+
     except Exception as e:
         logging.error(f"Error in generate_embeddings_task: {e}")
         raise
@@ -208,3 +199,31 @@ def delete_files(file_paths):
                 logging.info(f"Deleted file: {file_path}")
             except Exception as e:
                 logging.error(f"Error deleting file {file_path}: {e}")
+
+def batch_api_call(texts, batch_size=20):
+    """Call OpenAI's embedding API for multiple texts in batches."""
+    all_embeddings = []
+    
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        response = openai.Embedding.create(
+            model="text-embedding-ada-002",
+            input=batch
+        )
+        batch_embeddings = [item['embedding'] for item in response['data']]
+        all_embeddings.extend(batch_embeddings)
+    
+    return all_embeddings
+
+def generate_explanations_in_parallel(matches, max_workers=4):
+    """Generate match explanations in parallel."""
+    prospective_texts = [match['prospective_text'] for match in matches]
+    guide_texts = [match['guide_text'] for match in matches]
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        explanations = list(executor.map(
+            lambda args: generate_match_explanation(*args),
+            zip(prospective_texts, guide_texts)
+        ))
+    
+    return explanations
