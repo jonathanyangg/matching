@@ -1,6 +1,6 @@
 # Tour Guide Prospective Student Matching
 
-Welcome to **Tour Guide Prospective Student Matching**, a tool designed to seamlessly pair tour guides with prospective students using semantic search. Whether you’re running campus tours or planning personalized visits, this project simplifies the process, ensuring each prospective student is matched with the ideal guide.
+Welcome to **Tour Guide Prospective Student Matching**, a tool designed to seamlessly pair tour guides with prospective students using semantic search. Whether you're running campus tours or planning personalized visits, this project simplifies the process, ensuring each prospective student is matched with the ideal guide.
 
 **How It Works**
 
@@ -15,23 +15,13 @@ With this tool, you can focus on creating memorable visits while the system hand
 
 Our tour guide matching tool is currently deployed at https://matching-ndwd.onrender.com/
 
-Ensure that the files you upload are .csv files. Also ensure that they have the following columns:
+Ensure that the files you upload are .csv files. The system processes your CSV files as follows:
 
-- Slate ID
-- YOG
-- App Grade
-- Res Status
-- Person Sex
-- Person Academic Interests
-- Person Extra-Curricular Interest
-- Sport1
-- Sport2
-- Sport3
-- City
-- State/Region
-- Country
-- School
-- Person Race
-- Person Hispanic
+- First column: Name of the individual (tour guide or prospective student)
+- Second column: Gender
+- Third column: Grade/Year
+- All remaining columns: Used as data points for matching
+
+The system automatically processes all additional columns as matching criteria, so feel free to include any relevant attributes that would help create optimal matches.
 
 
