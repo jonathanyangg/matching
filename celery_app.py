@@ -255,13 +255,14 @@ def generate_embeddings_task(prospective_key, current_key):
         # Create a dictionary to track guide selection counts
         guide_selection_counts = {}
         
+        # --- STUDENT MATCHING PROCESS ---
         # Process each prospective student
         total_students = len(prospective_df)
         for i, row in prospective_df.iterrows():
             try:
                 logger.info(f"Processing student {i+1}/{total_students}: ID={row.iloc[0]}, Gender={row.iloc[1]}, Grade={row.iloc[2]}")
                 
-                # Add this check - fix for array embeddings
+                # Validate embeddings
                 if isinstance(row['Embeddings'], list) and len(row['Embeddings']) > 0:
                     # Embeddings exist and are valid
                     pass
@@ -272,7 +273,7 @@ def generate_embeddings_task(prospective_key, current_key):
                     logger.warning(f"Skipping student {i+1} - no embeddings available for ID={row.iloc[0]}")
                     continue
                 
-                # Calculate similarities vectorized
+                # Calculate similarity scores
                 similarities = calculate_similarities_vectorized(
                     row['Embeddings'],
                     current_embeddings_array
@@ -280,15 +281,15 @@ def generate_embeddings_task(prospective_key, current_key):
                 similarities = pd.Series(similarities, index=current_df.index)
                 logger.debug(f"Calculated {len(similarities)} similarity scores. Max score: {similarities.max():.4f}")
                 
-                # Extract gender and grade safely for logging
+                # Extract data for filtering
                 gender_value = str(row.iloc[1]).upper()[0] if pd.notna(row.iloc[1]) else ''
                 grade_value = float(row.iloc[2]) if pd.notna(row.iloc[2]) and row.iloc[2] != '' else 0
                 logger.info(f"Filtering guides for student ID={row.iloc[0]}: Gender={gender_value}, Grade={grade_value}")
                 
-                # Apply filters
+                # Apply gender and grade filters
                 mask = (
-                    (current_df['Gender_First'] == str(row.iloc[1]).upper()[0] if pd.notna(row.iloc[1]) else '') &
-                    (current_df['Grade_Float'] == float(row.iloc[2]) if pd.notna(row.iloc[2]) and row.iloc[2] != '' else 0)
+                    (current_df['Gender_First'] == gender_value) &
+                    (current_df['Grade_Float'] == grade_value)
                 )
                 logger.debug(f"Initial filter matched {mask.sum()} guides with same gender and grade")
                 
@@ -305,19 +306,24 @@ def generate_embeddings_task(prospective_key, current_key):
                 if excluded_count > 0:
                     logger.info(f"Excluded {excluded_count} guides who were already selected twice")
                 
+                # Get filtered similarity scores
                 filtered_similarities = similarities[mask_copy]
                 logger.info(f"Found {len(filtered_similarities)} eligible matches for student ID={row.iloc[0]}")
                 
+                # Skip if no matches found
                 if filtered_similarities.empty:
                     logger.warning(f"No suitable matches found for student ID={row.iloc[0]}. Continuing to next student.")
                     continue
                     
+                # Warn if fewer than 3 matches
                 if len(filtered_similarities) < 3:
                     logger.warning(f"Only {len(filtered_similarities)} matches found for student ID={row.iloc[0]} - fewer than the requested 3 matches")
                 
+                # Get top 3 matches (or fewer if less available)
                 top_matches = filtered_similarities.nlargest(3)
                 logger.info(f"Top match score for student ID={row.iloc[0]}: {top_matches.iloc[0]:.4f}")
                 
+                # --- GENERATE MATCH EXPLANATIONS ---
                 # Prepare matches for parallel explanation generation
                 matches_to_explain = [
                     {
@@ -329,7 +335,8 @@ def generate_embeddings_task(prospective_key, current_key):
                 
                 explanations = generate_explanations_in_parallel(matches_to_explain)
                 
-                # Bulk update matches
+                # --- UPDATE RESULTS ---
+                # Bulk update matches in the result dataframe
                 for j, ((idx, score), explanation) in enumerate(zip(top_matches.items(), explanations), 1):
                     update_data = {
                         f'suggestion_{j}': current_df.iloc[idx]['Name (First Last):'],
@@ -349,6 +356,7 @@ def generate_embeddings_task(prospective_key, current_key):
                 logger.error(f"Stack trace: {traceback.format_exc()}")
                 continue
         
+        # --- FINALIZE RESULTS ---
         # Log the final guide selection counts
         logger.info("Final guide selection counts:")
         for idx, count in guide_selection_counts.items():
@@ -372,11 +380,11 @@ def generate_embeddings_task(prospective_key, current_key):
         logger.info(f"Number of non-empty matches: {(result_df['suggestion_1'] != '').sum()}")
         logger.info(f"Sample of results:\n{result_df.head(2)}")
 
-        # Save to Redis
+        # --- SAVE RESULTS TO REDIS ---
         output = io.StringIO()
         result_df.to_csv(output, index=False)
         result_key = f"result_{prospective_key}"
-        redis_client.setex(result_key, 3600, output.getvalue())
+        redis_client.setex(result_key, REDIS_CACHE_EXPIRY, output.getvalue())
         
         logger.info(f"Task completed successfully. Result stored in Redis under key: {result_key}")
         return {"result_key": result_key}
@@ -387,7 +395,11 @@ def generate_embeddings_task(prospective_key, current_key):
 
 @celery_app.task
 def delete_files(file_paths):
-    """Delete files from the filesystem."""
+    """Delete files from the filesystem.
+    
+    Args:
+        file_paths: List of file paths to delete
+    """
     for file_path in file_paths:
         if os.path.exists(file_path):
             try:
