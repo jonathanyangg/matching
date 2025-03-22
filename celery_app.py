@@ -54,7 +54,15 @@ celery_app = Celery(
 redis_client = redis.from_url(os.environ.get("REDIS_URL"))
 
 def calculate_similarities_vectorized(prospective_embedding, current_embeddings_array):
-    """Calculate cosine similarities in a vectorized way."""
+    """Calculate cosine similarities in a vectorized way.
+    
+    Args:
+        prospective_embedding: Embedding vector for the prospective student
+        current_embeddings_array: Array of embedding vectors for guides
+        
+    Returns:
+        Array of similarity scores
+    """
     # Convert to numpy arrays for faster computation
     prospective_embedding = np.array(prospective_embedding)
     current_embeddings_array = np.vstack(current_embeddings_array)
@@ -67,7 +75,15 @@ def calculate_similarities_vectorized(prospective_embedding, current_embeddings_
     return similarities
 
 def format_dataframe_columns(df, start_pos=3):
-    """Merge columns from start_pos to the end into a single text column."""
+    """Merge columns from start_pos to the end into a single text column.
+    
+    Args:
+        df: DataFrame to process
+        start_pos: Starting column position (0-indexed) for columns to merge
+        
+    Returns:
+        DataFrame with added 'Text Query' column
+    """
     columns_to_merge = df.columns[start_pos:]
     df['Text Query'] = df.apply(
         lambda row: ', '.join([f"{col}: {row[col]}" for col in columns_to_merge if pd.notna(row[col])]),
@@ -178,12 +194,23 @@ def generate_explanations_in_parallel(matches, max_workers=MAX_WORKERS):
 
 @celery_app.task
 def generate_embeddings_task(prospective_key, current_key):
-    """
-    Optimized Celery task for student matching.
+    """Generate embeddings and find matches between prospective and current students.
+    
+    Args:
+        prospective_key: Redis key for prospective students CSV data
+        current_key: Redis key for current students CSV data
+        
+    Returns:
+        Dictionary with result_key pointing to the Redis key with result data
+        
+    Raises:
+        FileNotFoundError: If Redis data can't be retrieved
+        Various exceptions: For embedding or processing errors
     """
     try:
         logger.info(f"Starting task with Redis keys - Prospective: {prospective_key}, Current: {current_key}")
         
+        # --- DATA PREPARATION ---
         # Retrieve file contents from Redis
         prospective_content = redis_client.get(prospective_key)
         current_content = redis_client.get(current_key)
@@ -206,6 +233,7 @@ def generate_embeddings_task(prospective_key, current_key):
         # Replace 'PG' with '12'
         prospective_df.iloc[:, 2] = prospective_df.iloc[:, 2].replace('PG', '12')
 
+        # --- EMBEDDING GENERATION ---
         # Generate embeddings in batches
         logger.info("Generating embeddings for prospective students...")
         prospective_df['Embeddings'] = batch_api_call(prospective_df['Text Query'].tolist())
@@ -224,8 +252,7 @@ def generate_embeddings_task(prospective_key, current_key):
         for col in result_columns:
             prospective_df[col] = ""
             
-        # Create a dictionary to keep track of how many times each guide has been selected
-        # Key is the guide's index in current_df, value is the count of selections
+        # Create a dictionary to track guide selection counts
         guide_selection_counts = {}
         
         # Process each prospective student
